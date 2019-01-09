@@ -139,6 +139,44 @@ func (c *Client) SubscribeExt(pattern string, out chan<- *Message, ext interface
 	return c.subscribe(pattern, out, ext)
 }
 
+// ForgetSubscription ensure to remove subscription object from
+// the c.subscriptions slices. In back-side, the channel out
+// inside it should have been closed before
+// we search for 1st occurence of pattern
+func (c *Client) ForgetSubscription(pattern string) (index int) {
+	index = -1
+	var wg sync.WaitGroup
+
+	// copy the subscriptions slice
+	c.mtx.Lock()
+	subs := c.subscriptions
+	c.mtx.Unlock()
+
+	for i, s := range subs {
+		wg.Add(1)
+
+		// for performance, we iterate the slice in goroutine
+		go func(i int, s subscription, wg *sync.WaitGroup, index *int) {
+			if pattern == s.glob.String() {
+				// we need this to make sure only one goroutine have access
+				// to write the value at same time
+				c.mtx.Lock()
+				index = &i
+				if len(c.subscriptions) <= 1 {
+					c.subscriptions = make([]subscription, 0)
+				} else {
+					c.subscriptions = append(c.subscriptions[:i], c.subscriptions[i+1:]...)
+				}
+				c.mtx.Unlock()
+			}
+		}(i, s, &wg, &index)
+	}
+
+	wg.Wait()
+
+	return index
+}
+
 func (c *Client) ensureConnected() error {
 	c.mtx.RLock()
 	connected := c.connected
@@ -239,6 +277,9 @@ func (c *Client) subscribe(pattern string, out chan<- *Message, ext interface{})
 	if !rsp.Successful {
 		return errors.New(rsp.Error)
 	}
+
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
 	c.subscriptions = append(c.subscriptions, subscription{
 		glob: glob,
 		out:  out,
