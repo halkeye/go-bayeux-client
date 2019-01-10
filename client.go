@@ -26,7 +26,7 @@ type Client struct {
 	url           string
 	clientId      string
 	tomb          *tomb.Tomb
-	subscriptions []subscription
+	subscriptions map[string]interface{}
 	messages      chan *Message
 	connected     bool
 	http          *http.Client
@@ -87,9 +87,10 @@ func NewClient(url string, httpClient *http.Client) *Client {
 	}
 
 	return &Client{
-		url:      url,
-		http:     httpClient,
-		messages: make(chan *Message, 100),
+		url:           url,
+		http:          httpClient,
+		messages:      make(chan *Message, 100),
+		subscriptions: make(map[string]interface{}),
 	}
 }
 
@@ -121,7 +122,21 @@ func (c *Client) Unsubscribe(pattern string) error {
 	if !rsp.Successful {
 		return errors.New(rsp.Error)
 	}
+
+	c.doForgetSubscription(pattern)
+
 	return nil
+}
+
+// ForgetSubscription ensure to remove subscription object from
+// the c.subscriptions slices. In back-side, the channel out
+// inside it should have been closed before
+// we search for 1st occurence of pattern
+func (c *Client) doForgetSubscription(pattern string) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	c.subscriptions[pattern] = ""
 }
 
 // Subscribe is like `SubscribeExt` with a blank `ext` part.
@@ -137,44 +152,6 @@ func (c *Client) SubscribeExt(pattern string, out chan<- *Message, ext interface
 		return err
 	}
 	return c.subscribe(pattern, out, ext)
-}
-
-// ForgetSubscription ensure to remove subscription object from
-// the c.subscriptions slices. In back-side, the channel out
-// inside it should have been closed before
-// we search for 1st occurence of pattern
-func (c *Client) ForgetSubscription(pattern string) (index int) {
-	index = -1
-	var wg sync.WaitGroup
-
-	// copy the subscriptions slice
-	c.mtx.Lock()
-	subs := c.subscriptions
-	c.mtx.Unlock()
-
-	for i, s := range subs {
-		wg.Add(1)
-
-		// for performance, we iterate the slice in goroutine
-		go func(i int, s subscription, wg *sync.WaitGroup, index *int) {
-			if pattern == s.glob.String() {
-				// we need this to make sure only one goroutine have access
-				// to write the value at same time
-				c.mtx.Lock()
-				index = &i
-				if len(c.subscriptions) <= 1 {
-					c.subscriptions = make([]subscription, 0)
-				} else {
-					c.subscriptions = append(c.subscriptions[:i], c.subscriptions[i+1:]...)
-				}
-				c.mtx.Unlock()
-			}
-		}(i, s, &wg, &index)
-	}
-
-	wg.Wait()
-
-	return index
 }
 
 func (c *Client) ensureConnected() error {
@@ -204,9 +181,11 @@ func (c *Client) worker() error {
 	for {
 		select {
 		case msg := <-c.messages:
-			for _, s := range c.subscriptions {
-				if s.glob.MatchString(msg.Channel) {
-					s.out <- msg
+			for _, sub := range c.subscriptions {
+				if s, subOpened := sub.(subscription); subOpened {
+					if s.glob.MatchString(msg.Channel) {
+						s.out <- msg
+					}
 				}
 			}
 		case <-c.tomb.Dying():
@@ -280,10 +259,11 @@ func (c *Client) subscribe(pattern string, out chan<- *Message, ext interface{})
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	c.subscriptions = append(c.subscriptions, subscription{
+	c.subscriptions[glob.String()] = subscription{
 		glob: glob,
 		out:  out,
-	})
+	}
+
 	return nil
 }
 
