@@ -26,7 +26,7 @@ type Client struct {
 	url           string
 	clientId      string
 	tomb          *tomb.Tomb
-	subscriptions map[string]interface{}
+	subscriptions sync.Map
 	messages      chan *Message
 	connected     bool
 	http          *http.Client
@@ -90,7 +90,7 @@ func NewClient(url string, httpClient *http.Client) *Client {
 		url:           url,
 		http:          httpClient,
 		messages:      make(chan *Message, 100),
-		subscriptions: make(map[string]interface{}),
+		subscriptions: sync.Map{},
 	}
 }
 
@@ -136,7 +136,7 @@ func (c *Client) doForgetSubscription(pattern string) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
-	c.subscriptions[pattern] = ""
+	c.subscriptions.Store(pattern, "")
 }
 
 // Subscribe is like `SubscribeExt` with a blank `ext` part.
@@ -181,13 +181,15 @@ func (c *Client) worker() error {
 	for {
 		select {
 		case msg := <-c.messages:
-			for _, sub := range c.subscriptions {
+			c.subscriptions.Range(func(key, sub interface{}) bool {
 				if s, subOpened := sub.(subscription); subOpened {
 					if s.glob.MatchString(msg.Channel) {
 						s.out <- msg
 					}
 				}
-			}
+
+				return true
+			})
 		case <-c.tomb.Dying():
 			return nil
 		case <-time.After(c.interval):
@@ -259,10 +261,10 @@ func (c *Client) subscribe(pattern string, out chan<- *Message, ext interface{})
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	c.subscriptions[glob.String()] = subscription{
+	c.subscriptions.Store(glob.String(), subscription{
 		glob: glob,
 		out:  out,
-	}
+	})
 
 	return nil
 }
