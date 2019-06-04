@@ -45,6 +45,7 @@ type Message struct {
 type subscription struct {
 	glob ohmyglob.Glob
 	out  chan<- *Message
+	ext  interface{}
 }
 
 type request struct {
@@ -105,7 +106,11 @@ func (c *Client) Connect() error {
 func (c *Client) Close() error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	c.tomb.Killf("Close")
+	err := c.tomb.Killf("Close")
+	if err != nil {
+		log.Printf("[WRN] Enable to kill tomb while closing connection")
+	}
+
 	c.connected = false
 	return c.disconnect()
 }
@@ -170,7 +175,7 @@ func (c *Client) ensureConnected() error {
 	}
 	err := c.handshake()
 	if err == nil {
-		c.connected = err == nil
+		c.connected = true
 		c.tomb = &tomb.Tomb{}
 		c.tomb.Go(c.worker)
 	}
@@ -244,7 +249,7 @@ func (c *Client) disconnect() error {
 func (c *Client) subscribe(pattern string, out chan<- *Message, ext interface{}) error {
 	glob, err := ohmyglob.Compile(pattern, nil)
 	if err != nil {
-		return fmt.Errorf("Invalid pattern: %s", err)
+		return fmt.Errorf("ohmyglob: invalid pattern: %s", err)
 	}
 	rsp, err := c.send(&request{
 		Channel:      "/meta/subscribe",
@@ -264,6 +269,7 @@ func (c *Client) subscribe(pattern string, out chan<- *Message, ext interface{})
 	c.subscriptions.Store(glob.String(), subscription{
 		glob: glob,
 		out:  out,
+		ext:  ext,
 	})
 
 	return nil
@@ -297,7 +303,7 @@ func (c *Client) send(req *request) (*metaMessage, error) {
 	}
 
 	// 1. Check advice: Update interval
-	// 2. Check advice: Reconnect "handshake" => reconnect
+	// 2. Check advice: Reconnect "handshake" => reconnect (DONE, L:317)
 	// 3. Handle messages to just-created subscriptions
 
 	for _, msg := range messages {
@@ -305,6 +311,29 @@ func (c *Client) send(req *request) (*metaMessage, error) {
 			reply = &msg
 		} else {
 			c.messages <- &msg.Message
+		}
+	}
+
+	if reply != nil && reply.Advice != nil {
+		switch reply.Advice.Reconnect {
+		case "handshake":
+			log.Printf("[INFO] server advice 'handshake', reconnecting...")
+			err = c.handshake()
+
+			if err == nil {
+				// browse all existing subscriptions and recover connection with server
+				c.subscriptions.Range(func(key, value interface{}) bool {
+					c.doForgetSubscription(key.(string))
+
+					if sub, isValid := value.(subscription); isValid {
+						if err := c.subscribe(sub.glob.String(), sub.out, sub.ext); err != nil {
+							log.Printf("[WRN] unable to subscribe to %s: %s", sub.glob.String(), err)
+						}
+					}
+
+					return true
+				})
+			}
 		}
 	}
 
