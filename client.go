@@ -108,7 +108,7 @@ func (c *Client) Close() error {
 	defer c.mtx.Unlock()
 	err := c.tomb.Killf("Close")
 	if err != nil {
-		log.Printf("[WRN] Enable to kill tomb while closing connection")
+		log.Printf("[WRN] Killing tomb while closing connection: %s", err)
 	}
 
 	c.connected = false
@@ -116,6 +116,8 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Unsubscribe(pattern string) error {
+	c.doForgetSubscription(pattern)
+	
 	rsp, err := c.send(&request{
 		Channel:      "/meta/unsubscribe",
 		ClientId:     c.clientId,
@@ -124,11 +126,10 @@ func (c *Client) Unsubscribe(pattern string) error {
 	if err != nil {
 		return err
 	}
+
 	if !rsp.Successful {
 		return errors.New(rsp.Error)
 	}
-
-	c.doForgetSubscription(pattern)
 
 	return nil
 }
