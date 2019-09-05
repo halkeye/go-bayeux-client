@@ -104,6 +104,10 @@ func (c *Client) Connect() error {
 // Close notifies the Bayeux server of the intent to disconnect and terminates
 // the background polling loop.
 func (c *Client) Close() error {
+	if !c.connected {
+		return errors.New("unable to close client not yet connected")
+	}
+
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	err := c.tomb.Killf("Close")
